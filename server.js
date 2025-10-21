@@ -10,12 +10,10 @@ const app = express();
 // Connect to Database
 connectDB();
 
-
 const corsOptions = {
   origin: 'https://akashcrackers.netlify.app', // Your Netlify frontend URL
   optionsSuccessStatus: 200 // Some legacy browsers choke on 204
 };
-
 // Middleware
 app.use(cors()); // Enable CORS for all origins (adjust for production)
 app.use(express.json()); // Allow app to accept JSON data
@@ -33,6 +31,8 @@ app.use('/api/orders', require('./routes/orderRoutes'));
 app.use('/api/auth', require('./routes/authRoutes'));
 app.use('/api/collections', require('./routes/collectionRoutes'));
 app.use('/api/content', require('./routes/contentRoutes'));
+app.use('/api/payments', require('./routes/paymentRoutes'));
+app.use('/api/cart', require('./routes/cartRoutes'));
 // app.use('/api/content', require('./routes/contentRoutes')); // Keep commented until created
 
 // --- Error Handling Middleware --- (Optional but recommended)

@@ -1,201 +1,271 @@
 // controllers/orderController.js
 const Order = require('../models/Order');
-const Product = require('../models/Product'); // Needed to check stock, maybe get product details
+const Product = require('../models/Product');
+const User = require('../models/User');
 
-// Helper function to calculate total (or get from frontend if trusted)
-// This is a basic example; consider edge cases like discounts, taxes, shipping rules
-const calculateOrderAmount = async (items) => {
-    let total = 0;
-    for (const item of items) {
-        const product = await Product.findById(item.product.productId);
-        if (!product) {
-            throw new Error(`Product not found: ${item.product.productId}`);
-        }
-        if (product.stock < item.quantity) {
-             throw new Error(`Insufficient stock for ${product.name}. Available: ${product.stock}, Requested: ${item.quantity}`);
-        }
-        total += product.price * item.quantity;
-    }
-
-    // Add Shipping (Example logic)
-    const shipping = total > (process.env.FREE_SHIPPING_THRESHOLD || 2000) ? 0 : (process.env.STANDARD_SHIPPING_COST || 99);
-    total += shipping;
-
-    return total;
+// Helper - Recalculate based on items with priceAtOrder (or pass pre-calculated total)
+const calculateShipping = (subtotal) => {
+    // Default values if environment variables are not set
+    const freeShippingThreshold = parseInt(process.env.FREE_SHIPPING_THRESHOLD || '2000', 10);
+    const standardShippingCost = parseInt(process.env.STANDARD_SHIPPING_COST || '99', 10);
+    // Ensure calculation results in a number
+    return !isNaN(freeShippingThreshold) && !isNaN(standardShippingCost) && subtotal > freeShippingThreshold ? 0 : standardShippingCost;
 };
 
-// @desc    Create new order
-// @route   POST /api/orders
-// @access  Private
+// @desc    Create new order (Adjusted for new Item Schema)
+// This is typically called *after* payment verification or for COD
 const createOrder = async (req, res) => {
-    const { orderItems, shippingAddress, paymentMethod, paymentResult } = req.body; // paymentResult from payment gateway
+    // Assuming req contains verified data: req.user, req.body.orderItems, req.body.shippingAddress, req.body.paymentMethod
+    const { orderItems, shippingAddress, paymentMethod } = req.body;
 
-    if (!orderItems || orderItems.length === 0) {
-        return res.status(400).json({ message: 'No order items' });
+    // --- Input Validation ---
+    if (!orderItems || !Array.isArray(orderItems) || orderItems.length === 0) {
+        return res.status(400).json({ message: 'Order items are required and must be an array.' });
     }
-    if (!shippingAddress) {
-         return res.status(400).json({ message: 'Shipping address is required' });
+    if (!shippingAddress || typeof shippingAddress !== 'object') {
+        return res.status(400).json({ message: 'Shipping address object is required.' });
     }
-     if (!paymentMethod) {
-         return res.status(400).json({ message: 'Payment method is required' });
+    const requiredAddressFields = ['firstName', 'lastName', 'email', 'phone', 'street', 'city', 'state', 'pincode'];
+    for (const field of requiredAddressFields) {
+        // Allow optional fields like email/lastName if your frontend handles it
+        // if (!shippingAddress[field] && ['firstName', 'phone', 'street', 'city', 'state', 'pincode'].includes(field)) {
+        if (!shippingAddress[field]) { // Stricter check
+            return res.status(400).json({ message: `Missing required shipping address field: ${field}` });
+        }
+    }
+    if (!paymentMethod || !['cod', 'card', 'upi', 'online'].includes(paymentMethod)) {
+        return res.status(400).json({ message: 'Valid payment method required. Received: ' + paymentMethod });
     }
 
     try {
-        // 1. Prepare items with current data (optional but safer)
-        const itemsWithDetails = await Promise.all(orderItems.map(async (item) => {
-            const product = await Product.findById(item.product.id); // Assuming frontend sends product.id
-            if (!product) throw new Error(`Product not found: ${item.product.name}`);
-             if (product.stock < item.quantity) throw new Error(`Insufficient stock for ${product.name}`);
-            return {
-                product: { // Store details needed for the order summary
-                    productId: product._id,
-                    name: product.name,
-                    price: product.price, // Price at time of order
-                    image: product.images[0] || '',
-                },
+        let detailedItems = [];
+        let calculatedSubtotal = 0;
+
+        // 1. Verify products and stock, prepare items array for saving
+        // Use lean() for performance boost when just reading data
+        for (const item of orderItems) {
+            if (!item.productId || !item.quantity || item.quantity <= 0) {
+                 throw new Error(`Invalid item data provided: ${JSON.stringify(item)}`);
+            }
+            // Select only necessary fields + use lean()
+            const product = await Product.findById(item.productId).select('name price images stock').lean();
+            if (!product) {
+                throw new Error(`Product not found: ${item.productId}`);
+            }
+            if (product.stock < item.quantity) {
+                // Check stock again right before saving for better accuracy
+                throw new Error(`Insufficient stock for ${product.name}. Only ${product.stock} available.`);
+            }
+            detailedItems.push({
+                product: product._id, // Store ObjectId reference
                 quantity: item.quantity,
-            };
-        }));
+                // *** Ensure these details from the current product state are saved ***
+                priceAtOrder: product.price,
+                nameAtOrder: product.name,
+                imageAtOrder: product.images && product.images.length > 0 ? product.images[0] : '/placeholder.png',
+            });
+            calculatedSubtotal += product.price * item.quantity;
+        }
 
-        // 2. Calculate total server-side for accuracy
-        const calculatedTotal = await calculateOrderAmount(itemsWithDetails);
-        // Add more robust check against frontend total if needed
+        // 2. Calculate Shipping and Final Total
+        const shippingCost = calculateShipping(calculatedSubtotal);
+        const finalTotal = calculatedSubtotal + shippingCost;
 
-        // 3. Create the order document
+        // 3. Create the order object
         const order = new Order({
             userId: req.user._id, // From protect middleware
-            items: itemsWithDetails,
+            items: detailedItems, // Use new structure with ...AtOrder fields
             shippingAddress,
             paymentMethod,
-            paymentStatus: paymentMethod === 'cod' ? 'pending' : (paymentResult && paymentResult.status === 'COMPLETED' ? 'paid' : 'pending'), // Example logic
-            total: calculatedTotal,
-            // Add paymentResult details if available: paymentResult: { id: paymentResult.id, status: paymentResult.status, ... },
+            // If called after online payment verification, set to 'paid'
+            paymentStatus: paymentMethod === 'cod' ? 'pending' : (req.body.paymentStatus || 'paid'), // Allow passing paymentStatus for online
+            total: finalTotal, // Use server-calculated final total
+            status: 'pending', // Start all orders as pending for admin review/confirmation
+            // Include paymentResult if it comes from online payment verification
+            ...(req.body.paymentResult && { paymentResult: req.body.paymentResult })
         });
 
         // 4. Save the order
         const createdOrder = await order.save();
 
-        // 5. Update product stock (Important!)
-        for (const item of createdOrder.items) {
-            await Product.findByIdAndUpdate(item.product.productId, {
-                $inc: { stock: -item.quantity } // Decrement stock
-            });
-        }
+        // 5. Update stock for each product (use transaction for safety in production)
+        const stockUpdatePromises = createdOrder.items.map(item =>
+            Product.findByIdAndUpdate(item.product, { $inc: { stock: -item.quantity } })
+        );
+        await Promise.all(stockUpdatePromises);
 
-        res.status(201).json(createdOrder);
+        console.log(`Order ${createdOrder._id} created successfully for user ${req.user._id}`);
+
+        // Populate user details for the response IF needed by frontend immediately after creation
+        // await createdOrder.populate('userId', 'firstName lastName email'); // Often not needed right after creation
+
+        res.status(201).json(createdOrder); // Send back the created order
 
     } catch (error) {
         console.error(`Error creating order: ${error.message}`);
-        res.status(400).json({ message: error.message || 'Error creating order' }); // Send specific error back
+        console.error(error.stack);
+        // Provide specific error message back to frontend
+        res.status(400).json({ message: error.message || 'Error creating order' });
     }
 };
 
-// @desc    Get logged in user's orders
-// @route   GET /api/orders/myorders
-// @access  Private
+
+// @desc    Get logged in user orders (Optimized Population)
 const getMyOrders = async (req, res) => {
     try {
-        const orders = await Order.find({ userId: req.user._id }).sort({ createdAt: -1 });
+        console.time("getMyOrders Query");
+        // Use lean() for performance if you only need plain JS objects
+        const orders = await Order.find({ userId: req.user._id })
+            // No product population needed - rely on ...AtOrder fields
+            .select('-items.product') // Exclude the product ObjectId reference
+            .sort({ createdAt: -1 })
+            .lean(); // Use lean() for faster read-only queries
+        console.timeEnd("getMyOrders Query");
+        console.log(`getMyOrders: Found ${orders.length} orders for user ${req.user._id}`);
+        // Frontend map function will use item.nameAtOrder, item.imageAtOrder, item.priceAtOrder
         res.json(orders);
     } catch (error) {
-        console.error(`Error getting user orders: ${error.message}`);
-        res.status(500).json({ message: 'Server Error fetching orders' });
+        console.error('Error fetching user orders:', error);
+        res.status(500).json({ message: 'Server error fetching orders' });
     }
 };
 
-// @desc    Get order by ID
-// @route   GET /api/orders/:id
-// @access  Private
+// @desc    Get order by ID (Populate fully for details)
 const getOrderById = async (req, res) => {
     try {
-        const order = await Order.findById(req.params.id).populate('userId', 'firstName lastName email'); // Populate user details
+        console.time(`getOrderById ${req.params.id}`);
+        // Need full details here, so populate fully
+        const order = await Order.findById(req.params.id)
+            .populate('userId', 'firstName lastName email phone') // Populate user
+            .populate({
+                 path: 'items.product', // Populates based on the ObjectId stored in item.product
+                 // Select fields needed by the tracking page just in case ...AtOrder fails
+                 select: 'name images price categoryId shortDescription' // Add more if needed
+            });
+        console.timeEnd(`getOrderById ${req.params.id}`);
 
-        if (order) {
-            // Check if the order belongs to the user OR if the user is an admin
-            if (order.userId._id.toString() === req.user._id.toString() || req.user.role === 'admin') {
-                res.json(order);
-            } else {
-                res.status(403).json({ message: 'Not authorized to view this order' });
-            }
+        if (!order) {
+            return res.status(404).json({ message: 'Order not found' });
+        }
+
+        // Authorization check
+        // Ensure userId might be populated or just an ID
+        const ownerId = order.userId?._id?.toString() || order.userId?.toString();
+        if (req.user.role !== 'admin' && ownerId !== req.user._id.toString()) {
+            console.warn(`AuthZ failed: User ${req.user._id} tried to access order ${order._id} owned by ${ownerId}`);
+            return res.status(403).json({ message: 'Not authorized to view this order' });
+        }
+
+        res.json(order); // Send the potentially populated order
+
+    } catch (error) {
+        console.error(`Error fetching order ${req.params.id}:`, error);
+        if (error.name === 'CastError') {
+             res.status(400).json({ message: 'Invalid Order ID format' });
         } else {
-            res.status(404).json({ message: 'Order not found' });
+             res.status(500).json({ message: 'Server error fetching order' });
         }
-    } catch (error) {
-        console.error(`Error getting order by ID: ${error.message}`);
-         if (error.kind === 'ObjectId') {
-            return res.status(404).json({ message: 'Order not found (invalid ID format)' });
-        }
-        res.status(500).json({ message: 'Server Error fetching order' });
     }
 };
 
-// --- Admin Only ---
 
-// @desc    Get all orders
-// @route   GET /api/orders
-// @access  Private/Admin
+// @desc    Get all orders (Optimized Population, with Pagination)
 const getAllOrders = async (req, res) => {
-     try {
-        // Add filtering/pagination similar to getProducts
-        const orders = await Order.find({})
-            .populate('userId', 'firstName lastName email') // Populate user details
-            .sort({ createdAt: -1 });
-        res.json(orders);
+    try {
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 10;
+        const skip = (page - 1) * limit;
+
+        const filter = {}; // Add filters based on req.query if needed (e.g., status, date range)
+
+        console.time("getAllOrders Count");
+        const totalOrders = await Order.countDocuments(filter);
+        console.timeEnd("getAllOrders Count");
+
+        console.time("getAllOrders Query");
+        // Use lean() for performance
+        const orders = await Order.find(filter)
+            .populate('userId', 'firstName lastName email') // Populate user for display name/email
+            // No product population needed for list view - rely on ...AtOrder
+            .select('-items.product') // Exclude product ObjectId reference
+            .sort({ createdAt: -1 })
+            .skip(skip)
+            .limit(limit)
+            .lean(); // Use lean() for faster read-only queries
+        console.timeEnd("getAllOrders Query");
+        console.log(`getAllOrders: Found ${orders.length} orders for page ${page}`);
+
+        res.json({
+            orders,
+            currentPage: page,
+            totalPages: Math.ceil(totalOrders / limit),
+            totalOrders
+        });
+
     } catch (error) {
-        console.error(`Error getting all orders: ${error.message}`);
-        res.status(500).json({ message: 'Server Error fetching all orders' });
+        console.error('Error fetching all orders:', error);
+        res.status(500).json({ message: 'Server error fetching all orders' });
     }
 };
 
-// @desc    Update order status (and potentially tracking)
-// @route   PUT /api/orders/:id/status
-// @access  Private/Admin
+// @desc    Update order status - **CORRECTED**
 const updateOrderStatus = async (req, res) => {
     const { status, trackingNumber } = req.body;
-    const validStatuses = ['pending', 'confirmed', 'processing', 'shipped', 'delivered', 'cancelled'];
+    const { id } = req.params;
 
-    if (!status || !validStatuses.includes(status)) {
-         return res.status(400).json({ message: 'Invalid status provided' });
+    // Validation
+    const allowedStatuses = ['pending', 'confirmed', 'processing', 'shipped', 'delivered', 'cancelled'];
+    if (!status || !allowedStatuses.includes(status)) {
+        return res.status(400).json({ message: 'Invalid status provided' });
     }
 
     try {
-        const order = await Order.findById(req.params.id);
+        // Prepare the update object dynamically
+        const updateData = {
+            status: status,
+            // Only include trackingNumber in update if it was provided in the request body
+            ...(trackingNumber !== undefined && { trackingNumber: trackingNumber || undefined }), // Use || undefined to remove if empty string passed
+        };
 
-        if (order) {
-            const previousStatus = order.status;
-            order.status = status;
-            if (status === 'shipped' && trackingNumber) {
-                order.trackingNumber = trackingNumber;
-                // Maybe set estimated delivery based on shipping
+        // Conditionally set estimatedDelivery only when moving to 'shipped' *and* it's not already set
+        if (status === 'shipped') {
+            const currentOrder = await Order.findById(id).select('estimatedDelivery status').lean(); // Check current status and date
+            // Only set estimatedDelivery if it doesn't exist already
+            if (currentOrder && !currentOrder.estimatedDelivery) {
+                 const estimatedDate = new Date();
+                 estimatedDate.setDate(estimatedDate.getDate() + 5); // Example: 5 days from now
+                 updateData.estimatedDelivery = estimatedDate;
             }
-             if (status === 'delivered') {
-                 // Set paymentStatus to 'paid' for COD orders on delivery
-                 if (order.paymentMethod === 'cod') {
-                    order.paymentStatus = 'paid';
-                 }
-                 // Could set a deliveredAt timestamp
-            }
-             if (status === 'cancelled' && previousStatus !== 'cancelled') {
-                 // If cancelling, potentially restore stock (complex logic - handle carefully)
-                 // For simplicity here, we won't restore stock automatically
-                 // Add notification logic here if needed
-                 console.warn(`Order ${order._id} cancelled. Stock NOT automatically restored.`);
-             }
-
-            const updatedOrder = await order.save();
-
-            // TODO: Add logic here to send email/SMS notification to the user about status change
-
-            res.json(updatedOrder);
-        } else {
-            res.status(404).json({ message: 'Order not found' });
         }
+
+        // Use findByIdAndUpdate to update only specified fields
+        const updatedOrder = await Order.findByIdAndUpdate(
+            id,
+            { $set: updateData }, // Use $set to update only specified fields
+            { new: true, runValidators: false } // `new: true` returns the updated doc. runValidators: false bypasses schema validation on update path (use carefully).
+        )
+        .populate('userId', 'firstName lastName email') // Populate user details for response consistency
+        .lean(); // Use lean if you only need the plain JS object
+
+        if (!updatedOrder) {
+            return res.status(404).json({ message: 'Order not found' });
+        }
+
+        // No need to populate items.product, frontend should use stored details
+        res.json(updatedOrder);
+
+        // TODO: Implement sending notification (email/SMS) to the customer
+        // E.g., sendOrderStatusUpdateNotification(updatedOrder);
+
     } catch (error) {
-        console.error(`Error updating order status: ${error.message}`);
-        if (error.kind === 'ObjectId') {
-            return res.status(404).json({ message: 'Order not found (invalid ID format)' });
+        console.error(`Error updating order status for ${id}:`, error);
+        if (error.name === 'CastError') {
+             res.status(400).json({ message: 'Invalid Order ID format' });
+        } else {
+            console.error(error.stack); // Log full stack
+            // If validation error persists even with findByIdAndUpdate, it might be another schema issue
+            res.status(500).json({ message: 'Server error updating order status' });
         }
-        res.status(500).json({ message: 'Server Error updating order status' });
     }
 };
 

@@ -2,41 +2,53 @@
 const mongoose = require('mongoose');
 
 // Embedded Schemas
-const CartItemSchema = new mongoose.Schema({
-    product: { // Store essential product info or just the ID and fetch later
-        productId: { type: mongoose.Schema.Types.ObjectId, ref: 'Product', required: true },
-        name: { type: String, required: true },
-        price: { type: Number, required: true }, // Price *at the time of order*
-        image: String, // Store one image URL for reference
+const OrderItemSchema = new mongoose.Schema({ // Renamed for clarity
+    product: { // Store the ObjectId reference to the Product model
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Product',
+        required: true
     },
     quantity: {
         type: Number,
         required: true,
         min: 1,
     },
-}, { _id: false });
+    // *** ADDED FIELDS to store details at time of order ***
+    priceAtOrder: {
+        type: Number,
+        required: true
+    },
+    nameAtOrder: {
+        type: String,
+        required: true
+    },
+    imageAtOrder: { // Store one image URL
+        type: String,
+        default: '/placeholder.png' // Add a default placeholder if needed
+    },
+    // *** END ADDED FIELDS ***
+}, { _id: true }); // Enable _id for subdocuments if needed later
 
 const ShippingAddressSchema = new mongoose.Schema({
-    firstName: { type: String, required: true },
-    lastName: { type: String, required: true },
-    email: { type: String, required: true },
-    phone: { type: String, required: true },
-    street: { type: String, required: true },
-    city: { type: String, required: true },
-    state: { type: String, required: true },
-    pincode: { type: String, required: true },
+    firstName: { type: String, required: [true, 'First name is required'] },
+    lastName: { type: String, required: [true, 'Last name is required'] },
+    email: { type: String, required: [true, 'Email is required'] },
+    phone: { type: String, required: [true, 'Phone number is required'] },
+    street: { type: String, required: [true, 'Street address is required'] },
+    city: { type: String, required: [true, 'City is required'] },
+    state: { type: String, required: [true, 'State is required'] },
+    pincode: { type: String, required: [true, 'Pincode is required'] },
 }, { _id: false });
 
 // Main Order Schema
 const OrderSchema = new mongoose.Schema({
-    // Based on src/data/types.ts Order
     userId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User',
         required: true,
     },
-    items: [CartItemSchema], // Array of embedded cart items
-    total: { // Total amount paid
+    items: [OrderItemSchema], // Use the updated item schema
+    total: {
         type: Number,
         required: true,
     },
@@ -46,12 +58,12 @@ const OrderSchema = new mongoose.Schema({
         default: 'pending',
     },
     shippingAddress: {
-        type: ShippingAddressSchema, // Embed shipping address
+        type: ShippingAddressSchema,
         required: true,
     },
     paymentMethod: {
         type: String,
-        enum: ['card', 'upi', 'cod'],
+        enum: ['card', 'upi', 'cod', 'online'], // Keep 'online' as added previously
         required: true,
     },
     paymentStatus: {
@@ -60,27 +72,20 @@ const OrderSchema = new mongoose.Schema({
         default: 'pending',
     },
     trackingNumber: String,
-    estimatedDelivery: Date,
-    // Timestamps
-    createdAt: {
-        type: Date,
-        default: Date.now,
-    },
-    updatedAt: {
-        type: Date,
-        default: Date.now,
-    },
+    estimatedDelivery: Date, // Store as Date
+}, {
+    timestamps: true // Use mongoose timestamps (createdAt, updatedAt)
 });
 
-// Middleware to update `updatedAt`
-OrderSchema.pre('save', function(next) {
-  this.updatedAt = Date.now();
-  next();
-});
+// Indexes - Ensure the compound index is present and correct
+OrderSchema.index({ userId: 1, createdAt: -1 }); // Optimized for getMyOrders
+OrderSchema.index({ status: 1 }); // If filtering by status is common
+OrderSchema.index({ createdAt: -1 }); // Optimized for sorting getAllOrders
 
-// Indexes
-OrderSchema.index({ userId: 1 });
-OrderSchema.index({ status: 1 });
-OrderSchema.index({ createdAt: -1 });
+// Remove pre-save middleware if using timestamps: true
+// OrderSchema.pre('save', function (next) {
+//     this.updatedAt = Date.now(); // Handled by timestamps: true
+//     next();
+// });
 
-module.exports = mongoose.model('Order', OrderSchema); // Collection name will be 'orders'
+module.exports = mongoose.model('Order', OrderSchema);

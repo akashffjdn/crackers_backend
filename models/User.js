@@ -20,6 +20,19 @@ const AddressSchema = new mongoose.Schema({
     isDefault: { type: Boolean, default: false },
 });
 
+const CartItemSchema = new mongoose.Schema({
+    product: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Product',
+        required: true
+    },
+    quantity: {
+        type: Number,
+        required: true,
+        min: 1,
+        default: 1
+    }
+}, { _id: false });
 
 const UserSchema = new mongoose.Schema({
     firstName: {
@@ -52,6 +65,7 @@ const UserSchema = new mongoose.Schema({
         select: false,
     },
     addresses: [AddressSchema],
+    cart: [CartItemSchema],
     // --- ADDED WISHLIST FIELD ---
     wishlist: [{
         type: mongoose.Schema.Types.ObjectId,
