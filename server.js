@@ -15,7 +15,7 @@ const corsOptions = {
   optionsSuccessStatus: 200 // Some legacy browsers choke on 204
 };
 // Middleware
-app.use(cors(corsOptions))); // Enable CORS for all origins (adjust for production)
+app.use(cors(corsOptions)); // Enable CORS for all origins (adjust for production)
 app.use(express.json()); // Allow app to accept JSON data
 
 // Basic Route (Test Route)
