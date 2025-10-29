@@ -4,7 +4,6 @@ const bcrypt = require('bcryptjs');
 
 // AddressSchema remains the same
 const AddressSchema = new mongoose.Schema({
-    // ... (keep existing address schema)
     label: { type: String, required: true, trim: true },
     name: { type: String, required: true, trim: true },
     street: { type: String, required: true, trim: true },
@@ -66,12 +65,10 @@ const UserSchema = new mongoose.Schema({
     },
     addresses: [AddressSchema],
     cart: [CartItemSchema],
-    // --- ADDED WISHLIST FIELD ---
     wishlist: [{
         type: mongoose.Schema.Types.ObjectId,
         ref: 'Product' // Reference the Product model
     }],
-    // --- END ADDED FIELD ---
     role: {
         type: String,
         enum: ['user', 'admin'],
@@ -81,6 +78,10 @@ const UserSchema = new mongoose.Schema({
         type: Boolean,
         default: true,
     },
+    // --- ADDED FOR PASSWORD RESET ---
+    passwordResetToken: String,
+    passwordResetExpires: Date,
+    // --- END ADDED FIELDS ---
     createdAt: {
         type: Date,
         default: Date.now,
@@ -93,6 +94,11 @@ const UserSchema = new mongoose.Schema({
 
 // Middleware and Indexes remain the same
 UserSchema.pre('save', function(next) {
+    // Only hash password if modified (or is new)
+    // Removed password hashing here as it should ideally be in the controller
+    // to avoid hashing again when only profile fields change.
+
+    // Update 'updatedAt' timestamp
     if (this.isModified()) {
       this.updatedAt = Date.now();
     }

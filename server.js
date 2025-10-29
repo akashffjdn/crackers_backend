@@ -11,7 +11,7 @@ const app = express();
 connectDB();
 
 const corsOptions = {
-  origin: 'https://akash-crackers.netlify.app', // Your Netlify frontend URL
+  origin: process.env.FRONTEND_URL, // Your Netlify frontend URL
   optionsSuccessStatus: 200 // Some legacy browsers choke on 204
 };
 // Middleware
